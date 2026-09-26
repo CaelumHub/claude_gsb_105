@@ -444,15 +444,19 @@ class SocialGraphService:
         if k > config.RECOMMEND_CLAMP_MAX:
             k = config.RECOMMEND_CLAMP_MAX
         strategy = strategy or settings["strategy"]
-        diversity = config.DIVERSITY_LAMBDA
+        if strategy not in ("hybrid", "cf", "embedding", "popularity"):
+            strategy = settings["strategy"]
+        diversity = settings.get("diversity", config.DIVERSITY_LAMBDA)
         use_tags = settings["useTags"]
 
         if not refresh and uid in self._rec_cache:
             cached = self._rec_cache[uid]
-            result = dict(cached)
-            result["items"] = cached["items"][:k]
-            result["cached"] = True
-            return result
+            # The cache is only valid for the same strategy/diversity params.
+            if cached.get("strategy") == strategy and cached.get("diversity") == diversity:
+                result = dict(cached)
+                result["items"] = cached["items"][:k]
+                result["cached"] = True
+                return result
 
         graph = self.get_graph()
         users = self.store.load_users()

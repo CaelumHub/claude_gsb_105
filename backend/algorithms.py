@@ -648,24 +648,33 @@ def max_marginal_relevance(
     """
     if not candidates or diversity <= 0:
         return candidates[:k]
+    # Normalise raw scores to [0, 1] so the relevance term and the similarity
+    # penalty (bounded by 1) compete on the same scale -- otherwise large raw
+    # scores (e.g. degree-based popularity) would drown out ``diversity``.
+    raw_scores = [score for _c, score, _r in candidates]
+    s_min, s_max = min(raw_scores), max(raw_scores)
+    span = s_max - s_min
+
+    def _rel(score: float) -> float:
+        return (score - s_min) / span if span > 0 else 1.0
+
     selected: List[Tuple[int, float, str]] = []
     pool = list(candidates)
-    selected_ids: Set[int] = set()
 
     while pool and len(selected) < k:
         best_idx, best_val = 0, -1e18
         for idx, (c, score, reason) in enumerate(pool):
-            min_sim = 1e18
+            # Penalise by the *most* similar already-selected item.
+            max_sim = 0.0
             for s_id, _, _ in selected:
                 sim = _neighbor_overlap_sim(graph, c, s_id)
-                if sim < min_sim:
-                    min_sim = sim
-            mmr = (1.0 - diversity) * score + diversity * min_sim
+                if sim > max_sim:
+                    max_sim = sim
+            mmr = (1.0 - diversity) * _rel(score) - diversity * max_sim
             if mmr > best_val:
                 best_val, best_idx = mmr, idx
         chosen = pool.pop(best_idx)
         selected.append(chosen)
-        selected_ids.add(chosen[0])
     return selected
 
 
@@ -695,13 +704,11 @@ def hybrid_recommend(
     diagnostics.
     """
     friends = list(graph.neighbors(user))
-    weighted_degree = 0
-    for _n, w in graph.neighbors_with_weights(user):
-        weighted_degree += int(w)
-    if config.COLD_START_USE_WEIGHTED_DEGREE:
-        degree = weighted_degree
-    else:
-        degree = graph.degree(user)
+    # Cold-start is decided on the friend count (unweighted degree).  Edge
+    # weights are fractional interaction strengths, so a (truncated) weighted
+    # sum is not a meaningful "number of connections" and must not drive the
+    # threshold decision.
+    degree = graph.degree(user)
     cold_start = degree < config.COLD_START_CONNECTION_THRESHOLD
 
     exclude: Set[int] = set(friends)
@@ -718,7 +725,10 @@ def hybrid_recommend(
         _add(recommend_collaborative(graph, user, k * 4, exclude), 0.1)
     if strategy in ("embedding", "hybrid"):
         _add(recommend_embedding(graph, user, k * 4, exclude), 0.1)
-    _add(recommend_popularity(graph, user, k * 4, exclude), 1.0)
+    # Popularity is a strategy of its own and the cold-start fallback; mixing
+    # it into every strategy at full weight would make all strategies alike.
+    if strategy == "popularity" or cold_start:
+        _add(recommend_popularity(graph, user, k * 4, exclude), 1.0)
     if use_tags and (strategy in ("hybrid",) or cold_start):
         _add(recommend_tag_based(graph, user, k * 4, user_tags, exclude), 5.0)
 
@@ -726,7 +736,7 @@ def hybrid_recommend(
         _add(recommend_popularity(graph, user, k * 4, set()), 1.0)
 
     ranked = sorted(
-        pool.items(), key=lambda kv: (kv[1][0], kv[0])
+        pool.items(), key=lambda kv: (-kv[1][0], kv[0])
     )
     candidates = [(c, s, r) for c, (s, r) in ranked]
 
