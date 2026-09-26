@@ -302,7 +302,9 @@ class ApiRouter:
             if k < 1:
                 k = 1
             refresh = _to_bool(query.get("refresh"), False)
-            strategy = None
+            strategy = query.get("strategy")
+            if strategy not in ("hybrid", "cf", "embedding", "popularity"):
+                strategy = None  # fall back to the configured default
             return 200, self.service.recommend(uid, k=k, refresh=refresh, strategy=strategy)
         if route == "/recommend" and method == "POST":
             ids = (body or {}).get("ids") or []

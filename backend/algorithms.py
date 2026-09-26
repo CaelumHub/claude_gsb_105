@@ -646,26 +646,34 @@ def max_marginal_relevance(
     similarity to anything already chosen.  ``diversity`` = 0 yields the pure
     ranked list; ``diversity`` = 1 maximises spread.
     """
-    if not candidates or diversity <= 0:
+    if not candidates:
+        return []
+    if diversity <= 0:
         return candidates[:k]
+
+    # Normalise relevance to [0, 1] so it is comparable with the similarity
+    # penalty and ``diversity`` trades the two off meaningfully.
+    peak = max(score for _, score, _ in candidates) or 1.0
+    relevance = [score / peak for _, score, _ in candidates]
+
     selected: List[Tuple[int, float, str]] = []
     pool = list(candidates)
-    selected_ids: Set[int] = set()
+    rel = list(relevance)
 
     while pool and len(selected) < k:
         best_idx, best_val = 0, -1e18
         for idx, (c, score, reason) in enumerate(pool):
-            min_sim = 1e18
+            max_sim = 0.0
             for s_id, _, _ in selected:
                 sim = _neighbor_overlap_sim(graph, c, s_id)
-                if sim < min_sim:
-                    min_sim = sim
-            mmr = (1.0 - diversity) * score + diversity * min_sim
+                if sim > max_sim:
+                    max_sim = sim
+            mmr = (1.0 - diversity) * rel[idx] - diversity * max_sim
             if mmr > best_val:
                 best_val, best_idx = mmr, idx
         chosen = pool.pop(best_idx)
+        rel.pop(best_idx)
         selected.append(chosen)
-        selected_ids.add(chosen[0])
     return selected
 
 
@@ -695,40 +703,58 @@ def hybrid_recommend(
     diagnostics.
     """
     friends = list(graph.neighbors(user))
-    weighted_degree = 0
+    degree = len(friends)
+    weighted_degree = 0.0
     for _n, w in graph.neighbors_with_weights(user):
-        weighted_degree += int(w)
+        weighted_degree += w
+    # Cold start is judged on the number of connections (see README); the
+    # weighted variant is opt-in via config and uses the true weight sum.
     if config.COLD_START_USE_WEIGHTED_DEGREE:
-        degree = weighted_degree
+        connections = weighted_degree
     else:
-        degree = graph.degree(user)
-    cold_start = degree < config.COLD_START_CONNECTION_THRESHOLD
+        connections = degree
+    cold_start = connections < config.COLD_START_CONNECTION_THRESHOLD
 
     exclude: Set[int] = set(friends)
     exclude.add(user)
 
-    pool: Dict[int, Tuple[float, str]] = defaultdict(lambda: (0.0, ""))
+    # Blend the signals selected by ``strategy``.  Each signal is normalised
+    # to [0, 1] by its own peak score before weighting, so no signal dominates
+    # merely because of its raw scale (degree counts vs cosine vs overlaps).
+    # Each candidate keeps the reason of its strongest contributing signal.
+    pool: Dict[int, list] = {}
 
     def _add(items, weight):
+        if not items:
+            return
+        peak = max(score for _, score, _ in items) or 1.0
         for cid, score, reason in items:
-            prev_score, prev_reason = pool[cid]
-            pool[cid] = (prev_score + weight * score, reason)
+            contrib = weight * (score / peak)
+            entry = pool.get(cid)
+            if entry is None:
+                pool[cid] = [contrib, contrib, reason]
+            else:
+                entry[0] += contrib
+                if contrib > entry[1]:
+                    entry[1] = contrib
+                    entry[2] = reason
 
     if strategy in ("cf", "hybrid"):
-        _add(recommend_collaborative(graph, user, k * 4, exclude), 0.1)
+        _add(recommend_collaborative(graph, user, k * 4, exclude), 1.0)
     if strategy in ("embedding", "hybrid"):
-        _add(recommend_embedding(graph, user, k * 4, exclude), 0.1)
-    _add(recommend_popularity(graph, user, k * 4, exclude), 1.0)
+        _add(recommend_embedding(graph, user, k * 4, exclude), 1.0)
+    if strategy in ("popularity", "hybrid") or cold_start:
+        _add(recommend_popularity(graph, user, k * 4, exclude), 1.0)
     if use_tags and (strategy in ("hybrid",) or cold_start):
-        _add(recommend_tag_based(graph, user, k * 4, user_tags, exclude), 5.0)
+        _add(recommend_tag_based(graph, user, k * 4, user_tags, exclude), 1.0)
 
     if not pool:
         _add(recommend_popularity(graph, user, k * 4, set()), 1.0)
 
     ranked = sorted(
-        pool.items(), key=lambda kv: (kv[1][0], kv[0])
+        pool.items(), key=lambda kv: (-kv[1][0], kv[0])
     )
-    candidates = [(c, s, r) for c, (s, r) in ranked]
+    candidates = [(c, total, reason) for c, (total, _best, reason) in ranked]
 
     final = max_marginal_relevance(candidates, graph, k, diversity)
 
@@ -748,5 +774,6 @@ def hybrid_recommend(
         "cold_start": cold_start,
         "degree": degree,
         "diversity": diversity,
+        "use_tags": use_tags,
         "items": items,
     }

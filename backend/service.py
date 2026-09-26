@@ -444,15 +444,28 @@ class SocialGraphService:
         if k > config.RECOMMEND_CLAMP_MAX:
             k = config.RECOMMEND_CLAMP_MAX
         strategy = strategy or settings["strategy"]
-        diversity = config.DIVERSITY_LAMBDA
+        try:
+            diversity = float(settings.get("diversity", config.DIVERSITY_LAMBDA))
+        except (TypeError, ValueError):
+            diversity = config.DIVERSITY_LAMBDA
+        diversity = min(1.0, max(0.0, diversity))
         use_tags = settings["useTags"]
 
         if not refresh and uid in self._rec_cache:
             cached = self._rec_cache[uid]
-            result = dict(cached)
-            result["items"] = cached["items"][:k]
-            result["cached"] = True
-            return result
+            # A cached result is only valid for the same strategy / diversity /
+            # tag setting, and must hold at least k items to slice from.
+            if (
+                cached.get("strategy") == strategy
+                and cached.get("diversity") == diversity
+                and cached.get("use_tags") == use_tags
+                and len(cached.get("items", [])) >= k
+            ):
+                result = dict(cached)
+                result["items"] = cached["items"][:k]
+                result["k"] = k
+                result["cached"] = True
+                return result
 
         graph = self.get_graph()
         users = self.store.load_users()

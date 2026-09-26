@@ -94,7 +94,10 @@ RECOMMEND_DEFAULT_K = 10
 RECOMMEND_MAX_K = 50
 RECOMMEND_CLAMP_MAX = 5
 COLD_START_CONNECTION_THRESHOLD = 3
-COLD_START_USE_WEIGHTED_DEGREE = True
+# Judge cold start by friend count (the documented criterion).  The weighted
+# variant remains available but is off by default: with fractional edge
+# weights it under-counts connections and inverts the judgement.
+COLD_START_USE_WEIGHTED_DEGREE = False
 DIVERSITY_LAMBDA = 0.6
 EMBED_DIM = 32
 EMBED_MAX_DEPTH = 8
